@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class BertPooler(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
@@ -14,15 +15,19 @@ class BertPooler(nn.Module):
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
+
 class BertMLMHead(nn.Module):
-    def __init__(self, config):
+    def __init__(self, d_model, vocab_size, norm_eps=1e-12):
         super().__init__()
-        self.predictions = nn.Linear(config.hidden_size, config.vocab_size)
-        self.bias = nn.Parameter(torch.zeros(config.vocab_size))
+        self.transform = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.GELU(), nn.LayerNorm(d_model, eps=norm_eps)
+        )
+        self.decoder = nn.Linear(d_model, vocab_size)
 
     def forward(self, hidden_states):
-        hidden_states = self.predictions(hidden_states) + self.bias
-        return hidden_states
+        output = self.decoder(self.transform((hidden_states)))
+        return output
+
 
 class BertEmbedding(nn.Module):
     def __init__(self, vocab_size, d_model, max_len=512, pd=0.1, norm_eps=1e-12):
@@ -37,7 +42,11 @@ class BertEmbedding(nn.Module):
         seq_len = input_ids.size(1)
         batch_size = input_ids.size(0)
 
-        position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+        position_ids = (
+            torch.arange(seq_len, device=input_ids.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
 
@@ -46,4 +55,3 @@ class BertEmbedding(nn.Module):
         x += self.token_type_embedding(token_type_ids)
         x = self.layer_norm(x)
         return self.dropout(x)
-
