@@ -2,7 +2,7 @@ from itertools import chain
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-class BertDataset(Dataset):
+class BertMLMDataset(Dataset):
     def __init__(self, dataset, tokenizer, max_seq_length=512, batched=True, num_proc=1):
         self.dataset = dataset
         self.tokenizer = tokenizer
@@ -50,3 +50,59 @@ class BertDataset(Dataset):
 
     def __len__(self):
         return len(self.dataset)
+
+class BertNSPDataset(Dataset):
+    def __init__(self, hf_dataset, tokenizer: BertTokenizer, max_length=512):
+        self.dataset = hf_dataset
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+        # Precompute sentence pairs
+        self.sentence_pairs = self._prepare_sentence_pairs()
+
+    def _split_sentences(self, text):
+        # Use tokenizer's built-in sentence splitter if available
+        # Otherwise use a simple heuristic
+        return [s.strip() for s in text.replace('\n', ' ').split('.') if len(s.strip()) > 30]
+
+    def _prepare_sentence_pairs(self):
+        pairs = []
+        for sample in self.dataset:
+            sentences = self._split_sentences(sample["content"])
+            if len(sentences) < 2:
+                continue
+
+            for i in range(len(sentences) - 1):
+                is_next = random.random() > 0.5
+
+                sent_a = sentences[i]
+                if is_next:
+                    sent_b = sentences[i + 1]
+                    label = 0  # IsNext
+                else:
+                    # Sample random sentence B from another document
+                    rand_doc = random.choice(self.dataset)
+                    rand_sents = self._split_sentences(rand_doc["content"])
+                    if rand_sents:
+                        sent_b = random.choice(rand_sents)
+                        label = 1  # NotNext
+                    else:
+                        continue  # skip if empty
+
+                pairs.append((sent_a, sent_b, label))
+        return pairs
+
+    def __len__(self):
+        return len(self.sentence_pairs)
+
+    def __getitem__(self, idx):
+        sent_a, sent_b, label = self.sentence_pairs[idx]
+
+        encoding = self.tokenizer(
+            sent_a,
+            sent_b,
+            truncation=True,
+            return_tensors="pt"
+        )
+
+        return encoding["input_ids"].squeeze(0), torch.tensor(label, dtype=torch.long)
