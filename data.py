@@ -1,108 +1,103 @@
-from itertools import chain
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
+import random
 
-class BertMLMDataset(Dataset):
+class BertDataset(Dataset):
     def __init__(self, dataset, tokenizer, max_seq_length=512, batched=True, num_proc=1):
-        self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
-        self.dataset = self.dataset.map(self.tokenize_function, batched=batched, num_proc=num_proc, remove_columns=["text"])
-        self.dataset = self.dataset.map(self.group_texts, batched=batched, num_proc=num_proc, remove_columns=["token_type_ids", "attention_mask"])
+        self.chunk_size = max_seq_length // 2
+
+        dataset = dataset.remove_columns(['title', 'date', 'url'])
+        dataset = dataset.map(self.tokenize_function, batched=batched, num_proc=num_proc, remove_columns=["text"])
+        self.dataset = dataset.sort("sample_length")
 
     def tokenize_function(self, examples):
-        return tokenizer(examples["text"], return_special_tokens_mask=True)
-
-    def group_texts(self, examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, and if the total_length < max_seq_length  we exclude this batch and return an empty dict.
-        # We could add padding if the model supported it instead of this drop, you can customize this part to your needs.
-        total_length = (total_length // self.max_seq_length) * self.max_seq_length
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + self.max_seq_length] for i in range(0, total_length, self.max_seq_length)]
-            for k, t in concatenated_examples.items()
+        results = {
+            'input_ids': [],
+            'is_next': [],
+            'token_type_ids': [],
+            'special_tokens_mask': [],
+            'sample_length': []
         }
-        return result
+
+        toks = self.tokenizer(
+            examples["text"],
+            return_special_tokens_mask=True,
+            add_special_tokens=False
+        )
+
+        chunk_main = self.chunk_size - 2
+        chunk_random = self.chunk_size - 1
+        input_list = toks['input_ids']
+        total = len(input_list)
+
+        for i, tokens in enumerate(input_list):
+            num_chunks = len(tokens) // chunk_main
+            if num_chunks < 2:
+                continue
+
+            for j in range(num_chunks - 1):
+                a_ids = tokens[j * chunk_main:(j + 1) * chunk_main]
+
+                if random.random() > 0.5:
+                    b_ids = tokens[(j + 1) * chunk_random:(j + 2) * chunk_random]
+                    is_next = 1
+                else:
+                    # pick a random different example with at least 2 chunks
+                    while True:
+                        rand_idx = random.randint(0, total - 1)
+                        if rand_idx != i and len(input_list[rand_idx]) // chunk_random >= 2:
+                            break
+                    rand_tokens = input_list[rand_idx]
+                    rand_chunk = random.randint(0, (len(rand_tokens) // chunk_random) - 2)
+                    b_ids = rand_tokens[rand_chunk * chunk_random:(rand_chunk + 1) * chunk_random]
+                    is_next = 0
+
+                input_ids = [self.tokenizer.cls_token_id] + a_ids + [self.tokenizer.sep_token_id] + b_ids + [self.tokenizer.sep_token_id]
+                token_type_ids = [0] * (len(a_ids) + 2) + [1] * (len(b_ids) + 1)
+                special_tokens_mask = [1] + [0] * len(a_ids) + [1] + [0] * len(b_ids) + [1]
+
+                results['input_ids'].append(input_ids)
+                results['is_next'].append(is_next)
+                results['token_type_ids'].append(token_type_ids)
+                results['special_tokens_mask'].append(special_tokens_mask)
+                results['sample_length'].append(len(input_ids))
+
+        return results
 
     def mask_example(self, example):
         input_ids = torch.tensor(example['input_ids'])
-        special_tokens_mask = torch.tensor(example['special_tokens_mask'])
-        label = input_ids.clone()
-        probability_matrix = torch.full(input_ids.shape, 0.15)
-        special_tokens_mask = special_tokens_mask.to(torch.bool)
+        special_tokens_mask = torch.tensor(example['special_tokens_mask'], dtype=torch.bool)
+        token_type_ids = torch.tensor(example['token_type_ids'])
+        is_next = torch.tensor(example['is_next'])
+
+        labels = input_ids.clone()
+        probability_matrix = torch.full(labels.shape, 0.15)
         probability_matrix[special_tokens_mask] = 0.0
 
         masked_indices = torch.bernoulli(probability_matrix).bool()
-        label[~masked_indices] = -100
-        indices_replaced = (torch.bernoulli(torch.full(label.shape, 0.8)).bool() & masked_indices)
-        input_ids[indices_replaced] = tokenizer.mask_token_id
-        indices_random = (torch.bernoulli(torch.full(label.shape, 0.5)).bool() & masked_indices & ~indices_replaced)
-        input_ids[indices_random] = torch.randint(0, tokenizer.vocab_size, input_ids[indices_random].shape)
-        return input_ids, label
+        labels[~masked_indices] = -100
+
+        # 80% [MASK]
+        replace_prob = torch.bernoulli(torch.full(labels.shape, 0.8)).bool()
+        input_ids[masked_indices & replace_prob] = self.tokenizer.mask_token_id
+
+        # 10% random token
+        rand_prob = torch.bernoulli(torch.full(labels.shape, 0.5)).bool()
+        random_tokens = torch.randint(len(self.tokenizer), input_ids.shape, dtype=torch.long)
+        input_ids[masked_indices & ~replace_prob & rand_prob] = random_tokens[masked_indices & ~replace_prob & rand_prob]
+
+        return {
+            "input_ids": input_ids,
+            "token_type_ids": token_type_ids,
+            "label": labels,
+            "special_tokens_mask": special_tokens_mask,
+            "is_next": is_next
+        }
 
     def __getitem__(self, idx):
-        example = self.dataset[idx]
-        input, label = self.mask_example(example)
-        return mlm_input, mlm_label
+        return self.mask_example(self.dataset[idx])
 
     def __len__(self):
         return len(self.dataset)
-
-class BertNSPDataset(Dataset):
-    def __init__(self, hf_dataset, tokenizer: BertTokenizer, max_length=512):
-        self.dataset = hf_dataset
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-        # Precompute sentence pairs
-        self.sentence_pairs = self._prepare_sentence_pairs()
-
-    def _split_sentences(self, text):
-        # Use tokenizer's built-in sentence splitter if available
-        # Otherwise use a simple heuristic
-        return [s.strip() for s in text.replace('\n', ' ').split('.') if len(s.strip()) > 30]
-
-    def _prepare_sentence_pairs(self):
-        pairs = []
-        for sample in self.dataset:
-            sentences = self._split_sentences(sample["content"])
-            if len(sentences) < 2:
-                continue
-
-            for i in range(len(sentences) - 1):
-                is_next = random.random() > 0.5
-
-                sent_a = sentences[i]
-                if is_next:
-                    sent_b = sentences[i + 1]
-                    label = 0  # IsNext
-                else:
-                    # Sample random sentence B from another document
-                    rand_doc = random.choice(self.dataset)
-                    rand_sents = self._split_sentences(rand_doc["content"])
-                    if rand_sents:
-                        sent_b = random.choice(rand_sents)
-                        label = 1  # NotNext
-                    else:
-                        continue  # skip if empty
-
-                pairs.append((sent_a, sent_b, label))
-        return pairs
-
-    def __len__(self):
-        return len(self.sentence_pairs)
-
-    def __getitem__(self, idx):
-        sent_a, sent_b, label = self.sentence_pairs[idx]
-
-        encoding = self.tokenizer(
-            sent_a,
-            sent_b,
-            truncation=True,
-            return_tensors="pt"
-        )
-
-        return encoding["input_ids"].squeeze(0), torch.tensor(label, dtype=torch.long)
