@@ -1,15 +1,26 @@
 import torch
 from torch.utils.data import Dataset
 import random
+from datasets import load_from_disk
+from transformers import BertTokenizer
 
-class BertPretrainingDataset(Dataset):
-    def __init__(self, dataset, tokenizer, max_seq_length=512, batched=True, num_proc=1):
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+dataset = load_from_disk('/content/news_2025-07-24')
+
+class BertDataset(Dataset):
+    def __init__(self, dataset, tokenizer, max_seq_length=512, mlm_prob=0.15, mask_prob=0.8, random_prob=0.1, same_prob=0.1, batched=True, num_proc=1, device='cpu'):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.chunk_size = max_seq_length // 2
 
         dataset = dataset.map(self.tokenize_function, batched=batched, num_proc=num_proc, remove_columns=dataset.column_names)
         self.dataset = dataset.sort("sample_length")
+        assert mask_prob + random_prob + same_prob == 1.0, "mask_prob + random_prob + same_prob should be 1.0"
+        self.mlm_prob = mlm_prob
+        self.mask_prob = mask_prob
+        self.random_prob = random_prob
+        self.same_prob = same_prob
+        self.device = device
 
     def tokenize_function(self, examples):
         results = {
@@ -72,27 +83,28 @@ class BertPretrainingDataset(Dataset):
         is_next = torch.tensor(example['is_next'])
 
         labels = input_ids.clone()
-        probability_matrix = torch.full(labels.shape, 0.15)
+        probability_matrix = torch.full(labels.shape, self.mlm_prob)
         probability_matrix[special_tokens_mask] = 0.0
 
         masked_indices = torch.bernoulli(probability_matrix).bool()
         labels[~masked_indices] = -100
 
         # 80% [MASK]
-        replace_prob = torch.bernoulli(torch.full(labels.shape, 0.8)).bool()
+        replace_prob = torch.bernoulli(torch.full(labels.shape, self.mask_prob)).bool()
         input_ids[masked_indices & replace_prob] = self.tokenizer.mask_token_id
 
         # 10% random token
-        rand_prob = torch.bernoulli(torch.full(labels.shape, 0.5)).bool()
+        random_prob = self.random_prob / (1 - self.mask_prob)
+        rand_prob = torch.bernoulli(torch.full(labels.shape, random_prob)).bool()
         random_tokens = torch.randint(len(self.tokenizer), input_ids.shape, dtype=torch.long)
         input_ids[masked_indices & ~replace_prob & rand_prob] = random_tokens[masked_indices & ~replace_prob & rand_prob]
 
         return {
-            "input_ids": input_ids,
-            "token_type_ids": token_type_ids,
-            "label": labels,
-            "special_tokens_mask": special_tokens_mask,
-            "is_next": is_next
+            "input_ids": input_ids.to(self.device),
+            "token_type_ids": token_type_ids.to(self.device),
+            "labels": labels.to(self.device),
+            "special_tokens_mask": special_tokens_mask.to(self.device),
+            "is_next": is_next.to(self.device)
         }
 
     def __getitem__(self, idx):
