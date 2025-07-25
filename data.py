@@ -1,13 +1,8 @@
 import torch
 from torch.utils.data import Dataset
 import random
-from datasets import load_from_disk
-from transformers import BertTokenizer
 
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-dataset = load_from_disk('/content/news_2025-07-24')
-
-class BertDataset(Dataset):
+class BertPretrainingDataset(Dataset):
     def __init__(self, dataset, tokenizer, max_seq_length=512, mlm_prob=0.15, mask_prob=0.8, random_prob=0.1, same_prob=0.1, batched=True, num_proc=1, device='cpu'):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
