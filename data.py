@@ -2,14 +2,13 @@ import torch
 from torch.utils.data import Dataset
 import random
 
-class BertDataset(Dataset):
+class BertPretrainingDataset(Dataset):
     def __init__(self, dataset, tokenizer, max_seq_length=512, batched=True, num_proc=1):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.chunk_size = max_seq_length // 2
 
-        dataset = dataset.remove_columns(['title', 'date', 'url'])
-        dataset = dataset.map(self.tokenize_function, batched=batched, num_proc=num_proc, remove_columns=["text"])
+        dataset = dataset.map(self.tokenize_function, batched=batched, num_proc=num_proc, remove_columns=dataset.column_names)
         self.dataset = dataset.sort("sample_length")
 
     def tokenize_function(self, examples):
