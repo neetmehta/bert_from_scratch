@@ -1,16 +1,69 @@
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import random
+from torch.nn.utils.rnn import pad_sequence
+
+
+class BertPretrainingCollator:
+    def __init__(self, pad_token_id=0):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch):
+        input_ids = [example["input_ids"] for example in batch]
+        token_type_ids = [example["token_type_ids"] for example in batch]
+        attention_mask = [torch.ones(len(x), dtype=torch.long) for x in input_ids]
+        labels = [example["labels"] for example in batch]
+        special_tokens_mask = [example["special_tokens_mask"] for example in batch]
+        is_next = torch.stack([example["is_next"] for example in batch])
+
+        input_ids = pad_sequence(
+            input_ids, batch_first=True, padding_value=self.pad_token_id
+        )
+        token_type_ids = pad_sequence(token_type_ids, batch_first=True, padding_value=0)
+        attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0)
+        labels = pad_sequence(labels, batch_first=True, padding_value=-100)
+        special_tokens_mask = pad_sequence(
+            special_tokens_mask, batch_first=True, padding_value=1
+        )
+
+        return {
+            "input_ids": input_ids,
+            "token_type_ids": token_type_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+            "special_tokens_mask": special_tokens_mask,
+            "next_sentence_label": is_next,
+        }
+
 
 class BertPretrainingDataset(Dataset):
-    def __init__(self, dataset, tokenizer, max_seq_length=512, mlm_prob=0.15, mask_prob=0.8, random_prob=0.1, same_prob=0.1, batched=True, num_proc=1, device='cpu'):
+    def __init__(
+        self,
+        dataset,
+        tokenizer,
+        max_seq_length=512,
+        mlm_prob=0.15,
+        mask_prob=0.8,
+        random_prob=0.1,
+        same_prob=0.1,
+        batched=True,
+        num_proc=1,
+        device="cpu",
+    ):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.chunk_size = max_seq_length // 2
 
-        dataset = dataset.map(self.tokenize_function, batched=batched, num_proc=num_proc, remove_columns=dataset.column_names)
+        dataset = dataset.map(
+            self.tokenize_function,
+            batched=batched,
+            num_proc=num_proc,
+            remove_columns=dataset.column_names,
+        )
         self.dataset = dataset.sort("sample_length")
-        assert mask_prob + random_prob + same_prob == 1.0, "mask_prob + random_prob + same_prob should be 1.0"
+        assert (
+            mask_prob + random_prob + same_prob == 1.0
+        ), "mask_prob + random_prob + same_prob should be 1.0"
         self.mlm_prob = mlm_prob
         self.mask_prob = mask_prob
         self.random_prob = random_prob
@@ -19,63 +72,78 @@ class BertPretrainingDataset(Dataset):
 
     def tokenize_function(self, examples):
         results = {
-            'input_ids': [],
-            'is_next': [],
-            'token_type_ids': [],
-            'special_tokens_mask': [],
-            'sample_length': []
+            "input_ids": [],
+            "is_next": [],
+            "token_type_ids": [],
+            "special_tokens_mask": [],
+            "sample_length": [],
         }
 
         toks = self.tokenizer(
-            examples["text"],
-            return_special_tokens_mask=True,
-            add_special_tokens=False
+            examples["text"], return_special_tokens_mask=True, add_special_tokens=False
         )
 
         chunk_main = self.chunk_size - 2
         chunk_random = self.chunk_size - 1
-        input_list = toks['input_ids']
+        input_list = toks["input_ids"]
         total = len(input_list)
 
         for i, tokens in enumerate(input_list):
-            num_chunks = len(tokens) // chunk_main
+            num_chunks = len(tokens) // self.chunk_size
             if num_chunks < 2:
                 continue
 
-            for j in range(num_chunks - 1):
-                a_ids = tokens[j * chunk_main:(j + 1) * chunk_main]
+            for j in range(num_chunks - 2):
+                a_ids = tokens[j * chunk_main : (j + 1) * chunk_main]
 
                 if random.random() > 0.5:
-                    b_ids = tokens[(j + 1) * chunk_random:(j + 2) * chunk_random]
+                    b_ids = tokens[(j + 1) * chunk_random : (j + 2) * chunk_random]
                     is_next = 1
                 else:
                     # pick a random different example with at least 2 chunks
                     while True:
                         rand_idx = random.randint(0, total - 1)
-                        if rand_idx != i and len(input_list[rand_idx]) // chunk_random >= 2:
+                        if (
+                            rand_idx != i
+                            and len(input_list[rand_idx]) // self.chunk_size >= 2
+                        ):
                             break
                     rand_tokens = input_list[rand_idx]
-                    rand_chunk = random.randint(0, (len(rand_tokens) // chunk_random) - 2)
-                    b_ids = rand_tokens[rand_chunk * chunk_random:(rand_chunk + 1) * chunk_random]
+                    rand_chunk = random.randint(
+                        0, (len(rand_tokens) // self.chunk_size) - 2
+                    )
+                    b_ids = rand_tokens[
+                        rand_chunk * chunk_random : (rand_chunk + 1) * chunk_random
+                    ]
                     is_next = 0
 
-                input_ids = [self.tokenizer.cls_token_id] + a_ids + [self.tokenizer.sep_token_id] + b_ids + [self.tokenizer.sep_token_id]
+                input_ids = (
+                    [self.tokenizer.cls_token_id]
+                    + a_ids
+                    + [self.tokenizer.sep_token_id]
+                    + b_ids
+                    + [self.tokenizer.sep_token_id]
+                )
                 token_type_ids = [0] * (len(a_ids) + 2) + [1] * (len(b_ids) + 1)
-                special_tokens_mask = [1] + [0] * len(a_ids) + [1] + [0] * len(b_ids) + [1]
+                special_tokens_mask = (
+                    [1] + [0] * len(a_ids) + [1] + [0] * len(b_ids) + [1]
+                )
 
-                results['input_ids'].append(input_ids)
-                results['is_next'].append(is_next)
-                results['token_type_ids'].append(token_type_ids)
-                results['special_tokens_mask'].append(special_tokens_mask)
-                results['sample_length'].append(len(input_ids))
+                results["input_ids"].append(input_ids)
+                results["is_next"].append(is_next)
+                results["token_type_ids"].append(token_type_ids)
+                results["special_tokens_mask"].append(special_tokens_mask)
+                results["sample_length"].append(len(input_ids))
 
         return results
 
     def mask_example(self, example):
-        input_ids = torch.tensor(example['input_ids'])
-        special_tokens_mask = torch.tensor(example['special_tokens_mask'], dtype=torch.bool)
-        token_type_ids = torch.tensor(example['token_type_ids'])
-        is_next = torch.tensor(example['is_next'])
+        input_ids = torch.tensor(example["input_ids"])
+        special_tokens_mask = torch.tensor(
+            example["special_tokens_mask"], dtype=torch.bool
+        )
+        token_type_ids = torch.tensor(example["token_type_ids"])
+        is_next = torch.tensor(example["is_next"])
 
         labels = input_ids.clone()
         probability_matrix = torch.full(labels.shape, self.mlm_prob)
@@ -91,15 +159,19 @@ class BertPretrainingDataset(Dataset):
         # 10% random token
         random_prob = self.random_prob / (1 - self.mask_prob)
         rand_prob = torch.bernoulli(torch.full(labels.shape, random_prob)).bool()
-        random_tokens = torch.randint(len(self.tokenizer), input_ids.shape, dtype=torch.long)
-        input_ids[masked_indices & ~replace_prob & rand_prob] = random_tokens[masked_indices & ~replace_prob & rand_prob]
+        random_tokens = torch.randint(
+            len(self.tokenizer), input_ids.shape, dtype=torch.long
+        )
+        input_ids[masked_indices & ~replace_prob & rand_prob] = random_tokens[
+            masked_indices & ~replace_prob & rand_prob
+        ]
 
         return {
             "input_ids": input_ids.to(self.device),
             "token_type_ids": token_type_ids.to(self.device),
             "labels": labels.to(self.device),
             "special_tokens_mask": special_tokens_mask.to(self.device),
-            "is_next": is_next.to(self.device)
+            "is_next": is_next.to(self.device),
         }
 
     def __getitem__(self, idx):
