@@ -90,6 +90,7 @@ class BertEncoder(nn.Module):
 
     def forward(self, x, attention_mask=None, token_type_ids=None):
         key_padding_mask = (attention_mask == 0) if attention_mask is not None else None
+        key_padding_mask = key_padding_mask.to(x.device) if key_padding_mask is not None else None
         for block in self.blocks:
             x = block(x, src_key_padding_mask=key_padding_mask)
         return x
@@ -179,6 +180,8 @@ class BertForPretraining(nn.Module):
         self.cls.mlm_head.decoder.weight = (
             self.bert.bert_embedding.word_embedding.weight
         )
+        self.loss = nn.CrossEntropyLoss(
+            ignore_index=-100, reduction="mean")
         if initialize:
             self.init_parameters()
 
@@ -187,11 +190,27 @@ class BertForPretraining(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, x, attention_mask=None, token_type_ids=None):
+    def forward(self, batch):
+        
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        token_type_ids = batch["token_type_ids"]
+        labels = batch["labels"]
         sequence_output, pooled_output = self.bert(
-            x, attention_mask=attention_mask, token_type_ids=token_type_ids
+            input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids
         )
         prediction_scores, seq_relationship_score = self.cls(
             sequence_output, pooled_output
         )
-        return prediction_scores, seq_relationship_score
+        loss_mlm = self.loss(
+            prediction_scores.view(-1, prediction_scores.size(-1)),
+            labels.view(-1),
+        )
+        loss_nsp = self.loss(
+            seq_relationship_score.view(-1, seq_relationship_score.size(-1)),
+            batch["next_sentence_label"].view(-1),
+        )
+        total_loss = loss_mlm + loss_nsp
+        return {'loss': total_loss,
+                'prediction_scores': prediction_scores,
+                'seq_relationship_score': seq_relationship_score}
