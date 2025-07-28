@@ -116,17 +116,7 @@ def main():
     )
     
     # Start training
-    for epoch in range(config.num_epochs):
-        print(f"Epoch {epoch + 1}/{config.num_epochs}")
-        train_loss = trainer.train_epoch()
-        print(f"Training loss: {train_loss:.4f}")
-
-        if trainer.val_loader:
-            val_loss = trainer.eval_epoch()
-            print(f"Validation loss: {val_loss:.4f}")
-
-        # Save model checkpoint
-        torch.save(model.state_dict(), f"{config.checkpoint_dir}/model_epoch_{epoch + 1}.pth")
+    trainer.train()
         
 if __name__ == "__main__":
     main()

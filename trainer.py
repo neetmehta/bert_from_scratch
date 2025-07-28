@@ -43,12 +43,13 @@ class Trainer:
     def train_epoch(self):
         self.model.train()
         running_loss = 0.0
-
-        for step, batch in enumerate(tqdm(self.train_loader, desc="Training", leave=False)):
+        progress_bar = tqdm(self.train_loader, desc="Training", leave=False)
+        for step, batch in enumerate(progress_bar):
             self.optimizer.zero_grad()
 
             outputs = self.model(batch)
             loss = outputs['loss']
+            progress_bar.set_postfix(loss=loss.item())
             loss.backward()
             
             if (step + 1) % self.gradient_accumulation_steps == 0:

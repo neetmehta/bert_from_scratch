@@ -167,11 +167,11 @@ class BertPretrainingDataset(Dataset):
         ]
 
         return {
-            "input_ids": input_ids.to(self.device),
-            "token_type_ids": token_type_ids.to(self.device),
-            "labels": labels.to(self.device),
-            "special_tokens_mask": special_tokens_mask.to(self.device),
-            "is_next": is_next.to(self.device),
+            "input_ids": input_ids,
+            "token_type_ids": token_type_ids,
+            "labels": labels,
+            "special_tokens_mask": special_tokens_mask,
+            "is_next": is_next,
         }
 
     def __getitem__(self, idx):

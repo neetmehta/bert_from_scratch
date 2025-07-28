@@ -162,6 +162,7 @@ class BertForPretraining(nn.Module):
         norm_eps=1e-12,
         initialize=True,
         add_pooler=True,
+        device=None,
     ) -> None:
         super().__init__()
         self.bert = Bert(
@@ -182,6 +183,7 @@ class BertForPretraining(nn.Module):
         )
         self.loss = nn.CrossEntropyLoss(
             ignore_index=-100, reduction="mean")
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if initialize:
             self.init_parameters()
 
@@ -192,10 +194,11 @@ class BertForPretraining(nn.Module):
 
     def forward(self, batch):
         
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        token_type_ids = batch["token_type_ids"]
-        labels = batch["labels"]
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        token_type_ids = batch["token_type_ids"].to(self.device)
+        labels = batch["labels"].to(self.device)
+        next_sentence_label = batch["next_sentence_label"].to(self.device)
         sequence_output, pooled_output = self.bert(
             input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids
         )
@@ -208,7 +211,7 @@ class BertForPretraining(nn.Module):
         )
         loss_nsp = self.loss(
             seq_relationship_score.view(-1, seq_relationship_score.size(-1)),
-            batch["next_sentence_label"].view(-1),
+            next_sentence_label.view(-1),
         )
         total_loss = loss_mlm + loss_nsp
         return {'loss': total_loss,
